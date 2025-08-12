@@ -175,9 +175,6 @@ def main():
         batch_size = st.slider("Batch Size", min_value=1, max_value=10, value=2, 
                               help="Number of images to process in each batch")
         
-        st.subheader("📁 File Information")
-        st.info("Supported formats: PDF, PNG, JPG, JPEG")
-        
         # About section
         st.subheader("ℹ️ About")
         st.write("""
