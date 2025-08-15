@@ -6,6 +6,7 @@ import io
 import uuid
 import shutil
 from datetime import datetime
+import csv
 
 # Set page config for better layout
 st.set_page_config(
@@ -48,123 +49,185 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 def display_metrics(final_df):
-    """Display key metrics"""
+    """Display key metrics for any data"""
     if not final_df.empty:
-        total_weight = final_df['Total Weight (kg)'].sum()
-        total_types = len(final_df)
-        heaviest_type = final_df.loc[final_df['Total Weight (kg)'].idxmax(), 'Rebar Size']
+        total_rows = len(final_df)
+        total_columns = len(final_df.columns)
+        
+        # Find columns with data
+        data_columns = []
+        for col in final_df.columns:
+            non_null_count = final_df[col].notna().sum()
+            if non_null_count > 0:
+                data_columns.append(f"{col}: {non_null_count}")
         
         col1, col2, col3 = st.columns(3)
         
         with col1:
             st.metric(
-                label="🏋️ Total Weight",
-                value=f"{total_weight:.2f} kg",
-                delta=f"{total_weight*2.20462:.2f} lbs"
+                label="📊 Total Rows",
+                value=f"{total_rows}",
+                delta="Data records"
             )
         
         with col2:
             st.metric(
-                label="🔧 Rebar Types",
-                value=f"{total_types}",
-                delta="Different sizes"
+                label="� Total Columns", 
+                value=f"{total_columns}",
+                delta="Data fields"
             )
         
         with col3:
+            filled_columns = len([col for col in final_df.columns if final_df[col].notna().sum() > 0])
             st.metric(
-                label="⚡ Heaviest Type",
-                value=f"{heaviest_type}",
-                delta=f"{final_df.loc[final_df['Total Weight (kg)'].idxmax(), 'Total Weight (kg)']:.2f} kg"
+                label="✅ Columns with Data",
+                value=f"{filled_columns}",
+                delta=f"{(filled_columns/total_columns*100):.0f}% filled"
             )
 
 def parse_output(response):
-    """Parses and structures the extracted data properly into a DataFrame with expected columns."""
+    """Parses and structures the extracted data into a DataFrame with dynamic columns."""
     all_data = []
+    page_order = []
+    
+    print(f"🔍 Parsing {len(response)} response chunks...")
     
     try:
-        for json_string in response:
+        for i, json_string in enumerate(response):
             json_string = json_string.strip()
+            print(f"📄 Processing chunk {i+1}: {len(json_string)} characters")
+            page_order.append(f"Page {i+1}")
             
             try:
-                data = json.loads(json_string.replace("```", "").replace("json", ""))
+                cleaned_json = json_string.replace("```", "").replace("json", "").strip()
+                if not cleaned_json or cleaned_json == "[]":
+                    print(f"   ⚠️ Chunk {i+1} is empty, skipping")
+                    continue
+                    
+                data = json.loads(cleaned_json)
+                
                 if isinstance(data, list):
+                    print(f"   ✅ Chunk {i+1} contains {len(data)} records")
                     all_data.extend(data) 
+                elif isinstance(data, dict):
+                    all_data.append(data)
+                    print(f"   ✅ Chunk {i+1} contains 1 record")
                 else:
-                    st.warning(f"Unexpected structure in JSON string: {json_string}. Expected a list.")
+                    st.warning(f"Unexpected structure in JSON chunk {i+1}: Expected a list or dict, got {type(data)}")
+                    print(f"   ⚠️ Chunk {i+1} has unexpected structure: {type(data)}")
 
             except json.JSONDecodeError as e:
-                st.error(f"Failed to decode JSON string: {json_string}. Error: {e}")
-                return None
+                st.error(f"Failed to decode JSON chunk {i+1}: {e}")
+                print(f"   ❌ Chunk {i+1} JSON decode failed: {e}")
+                print(f"   📝 Content preview: {cleaned_json[:200]}...")
 
+        print(f"🎯 Total records collected: {len(all_data)} from {len(response)} chunks")
+        print(f"📋 Page processing order: {', '.join(page_order)}")
+        
         if not all_data:
-            st.warning("No data was extracted or parsed.")
+            st.warning("No tabular data was found in the document. Please ensure the document contains tables.")
+            print("⚠️ No data extracted - all chunks were empty")
             return None
 
-        expected_columns = [
-            "DWG #", "ITEM", "GRADE", "WEIGHT", "BUNDLE", "MARK", "QUANTITY", "SIZE", "TYPE", "TOTAL LENGTH",
-            "A", "B", "C", "D", "E", "F", "G", "H", "J", "K", "O", "R"
-        ]
-
+        # Create DataFrame with dynamic columns
         df = pd.DataFrame(all_data)
-        for col in expected_columns:
-            if col not in df.columns:
-                df[col] = None
-
-        return df[expected_columns]
+        
+        # Clean column names for better CSV compatibility
+        df.columns = df.columns.str.replace(' ', '_').str.replace('[^a-zA-Z0-9_]', '', regex=True)
+        
+        print(f"✅ DataFrame created with {len(df)} rows and {len(df.columns)} columns")
+        print(f"📊 Columns: {list(df.columns)}")
+        
+        return df
 
     except Exception as e:
-        st.error(f"An unexpected error occurred: {e}")
+        st.error(f"An unexpected error occurred during parsing: {e}")
+        print(f"❌ Unexpected parsing error: {e}")
         return None
 
-def transform_dataframe(structured_df):
-    """Transforms the structured DataFrame to compute rebar weight based on size, total length, and quantity."""
-    rebar_mass_per_meter = {
-        "10M": 0.785, "15M": 1.570, "20M": 2.355,
-        "25M": 3.925, "30M": 5.495, "35M": 7.850,
-        "45M": 11.775, "55M": 19.625
-    }
+def create_csv_download(df, filename_prefix="rebar_data"):
+    """Create CSV download functionality"""
+    try:
+        # Generate timestamp for unique filename
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"{filename_prefix}_{timestamp}.csv"
+        
+        # Convert DataFrame to CSV
+        csv_buffer = io.StringIO()
+        df.to_csv(csv_buffer, index=False)
+        csv_data = csv_buffer.getvalue()
+        
+        return csv_data, filename
+    except Exception as e:
+        st.error(f"Error creating CSV: {e}")
+        return None, None
 
-    structured_df = structured_df.rename(columns=lambda x: x.strip().upper())
-
-    if "SIZE" in structured_df.columns:
-        structured_df["Rebar Size"] = structured_df["SIZE"].astype(str).str.extract(r'(\d+M)')
-    else:
-        st.error("Rebar Size column not found in structured data.")
+def validate_and_clean_dataframe(df):
+    """Validate and clean the DataFrame with dynamic columns"""
+    try:
+        # Remove completely empty rows
+        df = df.dropna(how='all')
+        
+        # Clean all columns dynamically
+        for col in df.columns:
+            if df[col].dtype == 'object':  # Text columns
+                df[col] = df[col].astype(str).str.strip()
+                df[col] = df[col].replace('nan', '')
+                df[col] = df[col].replace('None', '')
+                df[col] = df[col].replace('', None)
+            else:  # Numeric columns
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+        
+        print(f"✅ DataFrame validated and cleaned: {len(df)} rows, {len(df.columns)} columns")
+        return df
+    
+    except Exception as e:
+        print(f"❌ DataFrame validation error: {e}")
+        st.error(f"Error validating data: {e}")
+        return df
+def analyze_dataframe(df):
+    """Analyze the DataFrame and provide insights"""
+    try:
+        if df.empty:
+            return None
+            
+        analysis = {
+            'total_rows': len(df),
+            'total_columns': len(df.columns),
+            'columns': list(df.columns),
+            'data_types': df.dtypes.to_dict(),
+            'missing_data': df.isnull().sum().to_dict(),
+            'numeric_columns': df.select_dtypes(include=['number']).columns.tolist(),
+            'text_columns': df.select_dtypes(include=['object']).columns.tolist()
+        }
+        
+        # Calculate statistics for numeric columns
+        numeric_stats = {}
+        for col in analysis['numeric_columns']:
+            if df[col].notna().sum() > 0:
+                numeric_stats[col] = {
+                    'count': df[col].notna().sum(),
+                    'min': df[col].min(),
+                    'max': df[col].max(),
+                    'mean': df[col].mean(),
+                    'sum': df[col].sum()
+                }
+        
+        analysis['numeric_stats'] = numeric_stats
+        
+        print(f"✅ DataFrame analysis completed")
+        return analysis
+        
+    except Exception as e:
+        st.error(f"Error analyzing DataFrame: {e}")
+        print(f"❌ Analysis error: {e}")
         return None
-
-    if "TOTAL LENGTH" in structured_df.columns:
-        structured_df["TOTAL LENGTH"] = (
-            structured_df["TOTAL LENGTH"]
-            .astype(str)
-            .str.replace(r"[^0-9.]", "", regex=True)
-        )
-        structured_df["TOTAL LENGTH"] = pd.to_numeric(structured_df["TOTAL LENGTH"], errors='coerce')
-    else:
-        st.error("TOTAL LENGTH column not found in structured data.")
-        return None
-
-    # Ensure QUANTITY is numeric
-    if "QUANTITY" in structured_df.columns:
-        structured_df["QUANTITY"] = pd.to_numeric(structured_df["QUANTITY"], errors='coerce')
-        structured_df["QUANTITY"].fillna(1, inplace=True)  # Default to 1 if missing or invalid
-    else:
-        st.warning("QUANTITY column not found. Assuming quantity of 1 for all items.")
-        structured_df["QUANTITY"] = 1
-
-    structured_df.dropna(subset=["Rebar Size", "TOTAL LENGTH"], inplace=True)
-    structured_df["Mass per Meter"] = structured_df["Rebar Size"].map(rebar_mass_per_meter)
-
-    # Updated calculation: Convert length to meters, multiply by quantity and mass per meter
-    structured_df["Total Weight (kg)"] = (structured_df["TOTAL LENGTH"] / 1000) * structured_df["QUANTITY"] * structured_df["Mass per Meter"]
-
-    final_df = structured_df.groupby("Rebar Size", as_index=False)["Total Weight (kg)"].sum()
-    return final_df
     
 
 def main():
     # Header
-    st.markdown('<h1 class="main-header">🏗️ Rebar AI Document Analyzer</h1>', unsafe_allow_html=True)
-    st.markdown('<p class="subtitle">Extract and analyze rebar details from construction drawings</p>', unsafe_allow_html=True)
+    st.markdown('<h1 class="main-header">🏗️ Rebar AI - Document Analysis</h1>', unsafe_allow_html=True)
+    st.markdown('<p class="subtitle">Extract tabular data from any document and convert to CSV</p>', unsafe_allow_html=True)
     
     # Sidebar
     with st.sidebar:
@@ -172,26 +235,33 @@ def main():
         
         # Processing options
         st.subheader("Processing Options")
-        batch_size = st.slider("Batch Size", min_value=1, max_value=10, value=2, 
-                              help="Number of images to process in each batch")
+        batch_size = st.slider("Batch Size", min_value=1, max_value=5, value=1, 
+                              help="Number of images to process in each batch. Lower values reduce timeout risk.")
+        
+        # API settings
+        with st.expander("⚙️ Advanced Settings"):
+            st.info("These settings help handle timeout issues")
+            max_retries = st.slider("Max Retries", min_value=1, max_value=5, value=3,
+                                  help="Number of retry attempts for failed API calls")
+            st.session_state['max_retries'] = max_retries
         
         # About section
         st.subheader("ℹ️ About")
         st.write("""
-        This tool uses AI to extract rebar information from construction drawings including:
-        - Drawing numbers
-        - Item details  
-        - Dimensions (A-R)
-        - Quantities and weights
-        - Bending details
+        This tool uses AI to extract tabular data from any document including:
+        - Tables with any structure
+        - Dynamic column detection
+        - Automatic data type recognition
+        - CSV export functionality
+        - Multi-page support
         """)
 
     # Main content
     st.markdown('<div class="upload-section">', unsafe_allow_html=True)
     uploaded_file = st.file_uploader(
-        "📁 Choose a construction drawing file",
+        "📁 Choose any document with tables",
         type=["pdf", "png", "jpg", "jpeg"],
-        help="Upload a PDF or image file containing rebar bending details"
+        help="Upload a PDF or image file containing tabular data"
     )
     st.markdown('</div>', unsafe_allow_html=True)
 
@@ -214,38 +284,133 @@ def main():
         # Processing with progress
         with st.spinner("🔄 Processing document... This may take a few moments"):
             progress_bar = st.progress(0)
+            status_text = st.empty()
+            
             progress_bar.progress(25)
+            status_text.text("📄 Extracting images from document...")
             
-            extracted_data = process_and_extract(file_buffer, file_bytes, uploaded_file, 
-                                               output_folder=user_folder, batch_size=batch_size)
-            progress_bar.progress(75)
-            
-            structured_df = parse_output(extracted_data)
-            progress_bar.progress(100)
+            try:
+                max_retries = st.session_state.get('max_retries', 3)
+                extracted_data = process_and_extract(file_buffer, file_bytes, uploaded_file, 
+                                                   output_folder=user_folder, batch_size=batch_size,
+                                                   max_retries=max_retries)
+                progress_bar.progress(75)
+                status_text.text("🤖 AI processing completed, parsing results...")
+                
+                structured_df = parse_output(extracted_data)
+                progress_bar.progress(100)
+                status_text.text("✅ Processing completed successfully!")
+                
+            except Exception as e:
+                progress_bar.progress(0)
+                status_text.text("")
+                st.error(f"❌ Processing failed: {str(e)}")
+                st.info("💡 **Troubleshooting tips:**")
+                st.write("- Try reducing the batch size in the sidebar")
+                st.write("- Ensure the document contains tables")
+                st.write("- Check your internet connection")
+                st.write("- The document might be too large or complex")
+                return
 
         if structured_df is not None and not structured_df.empty:
-            st.success(f"✅ Successfully extracted {len(structured_df)} records!")
+            st.success(f"✅ Successfully extracted {len(structured_df)} records from {len(structured_df.columns)} columns!")
+            
+            # Validate and clean the data
+            cleaned_df = validate_and_clean_dataframe(structured_df)
             
             # Create tabs for different views
-            tab1, tab2 = st.tabs(["📋 Raw Data", "📊 Summary"])
+            tab1, tab2, tab3 = st.tabs(["📋 Raw Data", "📊 Analysis", "📥 Downloads"])
             
             with tab1:
-                st.subheader("📋 Extracted Raw Data")
-                st.dataframe(structured_df, use_container_width=True)
+                st.subheader("📋 Extracted Table Data")
+                st.dataframe(cleaned_df, use_container_width=True)
+                
+                # Show data statistics
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("Total Records", len(cleaned_df))
+                with col2:
+                    st.metric("Total Columns", len(cleaned_df.columns))
+                with col3:
+                    filled_cells = cleaned_df.notna().sum().sum()
+                    total_cells = len(cleaned_df) * len(cleaned_df.columns)
+                    st.metric("Data Completeness", f"{(filled_cells/total_cells*100):.1f}%")
                 
             with tab2:
-                transformed_df = transform_dataframe(structured_df)
+                analysis = analyze_dataframe(cleaned_df)
                 
-                if transformed_df is not None:
+                if analysis:
                     # Display metrics
-                    display_metrics(transformed_df)
+                    display_metrics(cleaned_df)
                     
-                    st.subheader("📊 Weight Summary by Rebar Size")
-                    st.dataframe(transformed_df, use_container_width=True)
+                    st.subheader("📊 Data Analysis")
+                    
+                    col1, col2 = st.columns(2)
+                    with col1:
+                        st.write("**Numeric Columns:**")
+                        if analysis['numeric_columns']:
+                            for col in analysis['numeric_columns']:
+                                if col in analysis['numeric_stats']:
+                                    stats = analysis['numeric_stats'][col]
+                                    st.write(f"- **{col}**: {stats['count']} values, Sum: {stats['sum']:.2f}")
+                        else:
+                            st.write("No numeric columns found")
+                    
+                    with col2:
+                        st.write("**Text Columns:**")
+                        if analysis['text_columns']:
+                            for col in analysis['text_columns']:
+                                unique_count = cleaned_df[col].nunique()
+                                st.write(f"- **{col}**: {unique_count} unique values")
+                        else:
+                            st.write("No text columns found")
                 else:
-                    st.warning("⚠️ Transformation failed. Check extracted data.")
+                    st.warning("⚠️ Analysis failed. Check extracted data.")
+            
+            with tab3:
+                st.subheader("📥 Download Options")
+                
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    st.write("**Complete Data CSV**")
+                    raw_csv, raw_filename = create_csv_download(cleaned_df, "extracted_table_data")
+                    if raw_csv:
+                        st.download_button(
+                            label="� Download Complete CSV",
+                            data=raw_csv,
+                            file_name=raw_filename,
+                            mime="text/csv",
+                            help="Download all extracted data as CSV"
+                        )
+                        st.success(f"✅ Data ready: {len(cleaned_df)} records, {len(cleaned_df.columns)} columns")
+                
+                with col2:
+                    st.write("**Data Summary**")
+                    st.write(f"- **Rows**: {len(cleaned_df)}")
+                    st.write(f"- **Columns**: {len(cleaned_df.columns)}")
+                    st.write(f"- **Column Names**: {', '.join(cleaned_df.columns)}")
+                
+                # Additional information
+                st.info("""
+                📋 **CSV File Contents:**
+                - **Dynamic Columns**: Column names extracted directly from the table headers
+                - **All Data Types**: Numbers, text, and mixed data preserved
+                - **Multi-page**: Data from all pages combined
+                - **Clean Format**: Ready for analysis in Excel, Google Sheets, or other tools
+                """)
+                
         else:
-            st.error("❌ No valid data found in the document. Please check if the document contains 'BENDING DETAILS' tables.")
+            st.error("❌ No valid data found in the document. Please check if the document contains tabular data.")
+            st.info("""
+            🔍 **Troubleshooting:**
+            - Ensure the document contains tables with clear structure
+            - Check if the document is readable (not scanned image)
+            - Try uploading a different page or document
+            - Verify the document quality and resolution
+            """)
         
         # Cleanup
         shutil.rmtree(user_folder, ignore_errors=True)
